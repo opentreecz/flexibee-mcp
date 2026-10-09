@@ -20,6 +20,7 @@ The project will provide:
 | Document | Contents |
 | --- | --- |
 | [Latest decisions](docs/decisions.md) | Approved language/platform and clarified local-MCP deployment |
+| [Phase 1 plan](docs/phase-1.md) | Work packages, tool contracts, tests and definition of done for the read-only MCP |
 | [API research](docs/research.md) | Official sources, API semantics, capability map, live demo observations, unresolved questions |
 | [Language comparison](docs/language-comparison.md) | Go/Rust/Python/TypeScript/C#, official SDK evidence, OS distribution and recommendation |
 | [Architecture](docs/architecture.md) | Proposed stack, tools, adapter contracts, skills, deployment and client compatibility |

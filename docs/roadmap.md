@@ -14,6 +14,8 @@ Confirmed requirements: Go, x86-64, Windows 11/Debian 13/openSUSE/Fedora, macOS 
 
 ## M1 — Usable read-only MCP and first skills
 
+Prepared as [Phase 1](phase-1.md) with work packages, tool contracts, risks and a definition of done. Implementation has not started; the Go toolchain is not yet installed on the development machine.
+
 Deliver:
 
 - Go project, pinned official MCP SDK, native release builds and meaningful CI checks.
@@ -85,7 +87,7 @@ These are independent tracks; cloud certification can be brought forward once a 
 
 ### Needed to begin M1
 
-Go, x86-64, local stdio and one account per process are approved. The read-only foundation and two skills remain the initial delivery plan. Specify openSUSE edition/version and Fedora release before claiming platform verification; this does not block portable core development.
+Go, x86-64, local stdio and one account per process are approved. The read-only foundation and two skills remain the initial delivery plan, detailed in [Phase 1](phase-1.md). Install a Go 1.25+ toolchain before the first work package. Specify openSUSE edition/version and Fedora release before claiming platform verification; this does not block portable core development.
 
 ### Needed during development / before integration verification
 
