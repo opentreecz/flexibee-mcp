@@ -1,0 +1,33 @@
+# Binaries
+flexibee-mcp
+flexibee-mcp.exe
+dist/
+
+# Go
+*.test
+*.out
+vendor/
+
+# Environment / secrets
+.env
+*.env
+flexibee.env
+*_password
+*_secret
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+coverage.out
+coverage.html
+
+# graphify knowledge graph artifacts
+graphify-out/

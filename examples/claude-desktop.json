@@ -1,0 +1,13 @@
+{
+  "_comment": "Add the 'flexibee' entry to your existing claude_desktop_config.json mcpServers section. Set credentials via environment, never hard-code them here. Claude Desktop config is typically at: macOS: ~/Library/Application Support/Claude/claude_desktop_config.json | Windows: %APPDATA%\\Claude\\claude_desktop_config.json",
+  "mcpServers": {
+    "flexibee": {
+      "command": "/path/to/flexibee-mcp",
+      "env": {
+        "FLEXIBEE_URL": "https://your-flexibee-host:5434",
+        "FLEXIBEE_USERNAME": "api-user",
+        "FLEXIBEE_PASSWORD_FILE": "/path/to/.flexibee-password"
+      }
+    }
+  }
+}

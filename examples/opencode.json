@@ -1,0 +1,14 @@
+{
+  "_comment": "Add the 'flexibee' block to the 'mcp' section of your opencode.json (project root or ~/.config/opencode/opencode.json). OpenCode uses type 'local' for stdio-based MCP servers.",
+  "mcp": {
+    "flexibee": {
+      "type": "local",
+      "command": ["/path/to/flexibee-mcp"],
+      "environment": {
+        "FLEXIBEE_URL": "https://your-flexibee-host:5434",
+        "FLEXIBEE_USERNAME": "api-user",
+        "FLEXIBEE_PASSWORD_FILE": "/home/user/.flexibee-password"
+      }
+    }
+  }
+}

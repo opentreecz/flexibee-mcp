@@ -1,0 +1,13 @@
+{
+  "_comment": "Place this file as .mcp.json in your project root for Claude Code to pick it up automatically. Alternatively, register via CLI: claude mcp add flexibee /path/to/flexibee-mcp --env FLEXIBEE_URL=https://your-flexibee-host:5434 --env FLEXIBEE_USERNAME=api-user --env FLEXIBEE_PASSWORD_FILE=/path/to/.flexibee-password",
+  "mcpServers": {
+    "flexibee": {
+      "command": "/path/to/flexibee-mcp",
+      "env": {
+        "FLEXIBEE_URL": "https://your-flexibee-host:5434",
+        "FLEXIBEE_USERNAME": "api-user",
+        "FLEXIBEE_PASSWORD_FILE": "/path/to/.flexibee-password"
+      }
+    }
+  }
+}
