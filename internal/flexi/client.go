@@ -3,40 +3,22 @@
 //
 // Package layout:
 //
-//   - client.go  – FilterNode, RawFilter, SortField, QueryOptions, Client (this file)
-//   - query.go   – filter implementations, Query, QueryResult, URL/body builders
-//   - envelopes.go – response envelope types (Company, Evidence, Property, …)
-//   - errors.go  – FlexiError, ErrorKind, constructors, ParseAppErrors
+//   - client.go          – FilterNode, RawFilter, SortField, QueryOptions, Client
+//   - transport.go       – Transport interface, AutoTransport, shared HTTP helpers
+//   - transport_api.go   – API (Basic Auth) transport
+//   - transport_session.go – v2 Session transport (no licence required)
+//   - transport_java.go  – Java subprocess transport (native client mimic)
+//   - query.go           – filter implementations, Query, QueryResult, URL/body builders
+//   - envelopes.go       – response envelope types (Company, Evidence, Property, …)
+//   - errors.go          – FlexiError, ErrorKind, constructors, ParseAppErrors
 package flexi
 
 import (
-	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
-	"os"
-	"strings"
-	"time"
 
 	"github.com/opentreecz/flexibee-mcp/internal/config"
-)
-
-// ── Constants ─────────────────────────────────────────────────────────────────
-
-const (
-	// userAgent is sent as the User-Agent header on every outbound request.
-	userAgent = "flexibee-mcp/0.1 (https://github.com/opentreecz/flexibee-mcp)"
-
-	// maxRedirects is the maximum number of same-origin redirects followed per
-	// request.  FlexiBee uses HTTP 301 to redirect non-internal identifiers to
-	// their canonical internal-ID URL.
-	maxRedirects = 5
 )
 
 // ── Filter tree interface ─────────────────────────────────────────────────────
@@ -104,27 +86,22 @@ type QueryOptions struct {
 
 // ── HTTP client ───────────────────────────────────────────────────────────────
 
-// Client is an authenticated FlexiBee REST API HTTP client.
+// Client is an authenticated FlexiBee REST API client.
+//
+// It uses a Transport to perform HTTP communication and handles response
+// envelope parsing and business logic.  The active transport is selected
+// automatically (api → session → java) based on FLEXIBEE_AUTH_MODE.
 //
 // A single Client encapsulates one account's credentials.  Credentials are
-// applied on every request via HTTP Basic authentication and are never
-// written to any log output.
+// applied by the underlying Transport and never written to any log output.
 type Client struct {
-	httpClient *http.Client
-	baseURL    string
-	username   string
-	password   string // never log
-	userAgent  string
-	cfg        *config.Config
+	transport Transport
+	cfg       *config.Config
 }
 
 // NewClient constructs a Client from the validated configuration.
-//
-// It creates exactly one *http.Client with:
-//   - a bounded timeout derived from cfg.TimeoutMS,
-//   - a cloned default transport (connection reuse, HTTP/2 where available),
-//   - an optional private CA bundle appended to the system cert pool, and
-//   - a same-origin redirect policy capped at maxRedirects hops.
+// It creates an AutoTransport that tries API auth first, falling back to
+// session auth on HTTP 402, and finally to the Java subprocess transport.
 func NewClient(cfg *config.Config) (*Client, error) {
 	if cfg == nil {
 		return nil, NewConfigError("config must not be nil")
@@ -133,176 +110,55 @@ func NewClient(cfg *config.Config) (*Client, error) {
 		return nil, NewConfigError("base URL is required")
 	}
 
-	transport, err := buildTransport(cfg.CAFile)
+	tr, err := NewAutoTransport(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("flexi.NewClient: %w", err)
 	}
 
-	c := &Client{
-		baseURL:   cfg.BaseURL,
-		username:  cfg.Username,
-		password:  cfg.Password,
-		userAgent: userAgent,
+	return &Client{
+		transport: tr,
 		cfg:       cfg,
-	}
-	c.httpClient = &http.Client{
-		Timeout:       time.Duration(cfg.TimeoutMS) * time.Millisecond,
-		Transport:     transport,
-		CheckRedirect: c.checkRedirect,
-	}
-	return c, nil
+	}, nil
 }
 
-// buildTransport returns a cloned http.DefaultTransport, optionally extended
-// with a private CA certificate bundle appended to the system cert pool.
-func buildTransport(caFile string) (*http.Transport, error) {
-	base, ok := http.DefaultTransport.(*http.Transport)
-	if !ok {
-		return nil, errors.New("http.DefaultTransport is not *http.Transport")
-	}
-	transport := base.Clone()
-
-	if caFile == "" {
-		return transport, nil
-	}
-
-	pemData, err := os.ReadFile(caFile)
-	if err != nil {
-		return nil, fmt.Errorf("reading CA file %q: %w", caFile, err)
-	}
-
-	pool, err := x509.SystemCertPool()
-	if err != nil {
-		pool = x509.NewCertPool() // fall back to empty pool on unsupported platforms
-	}
-	if !pool.AppendCertsFromPEM(pemData) {
-		return nil, fmt.Errorf("CA file %q: no valid PEM certificates found", caFile)
-	}
-
-	tlsCfg := transport.TLSClientConfig
-	if tlsCfg == nil {
-		tlsCfg = &tls.Config{MinVersion: tls.VersionTLS12}
-	} else {
-		tlsCfg = tlsCfg.Clone()
-	}
-	tlsCfg.RootCAs = pool
-	transport.TLSClientConfig = tlsCfg
-	return transport, nil
+// NewClientWithTransport constructs a Client with an explicitly provided
+// Transport.  Used in tests and for manual transport overrides.
+func NewClientWithTransport(tr Transport, cfg *config.Config) *Client {
+	return &Client{transport: tr, cfg: cfg}
 }
 
-// checkRedirect implements the redirect policy:
-//   - max maxRedirects hops,
-//   - same origin only (scheme + hostname + port must all match),
-//   - no HTTPS-to-HTTP downgrade.
-//
-// Credentials are added per-request in do().  Go strips Authorization on
-// host changes; our cross-origin guard ensures they are never forwarded.
-func (c *Client) checkRedirect(req *http.Request, via []*http.Request) error {
-	if len(via) >= maxRedirects {
-		return fmt.Errorf("flexibee: too many redirects (max %d)", maxRedirects)
-	}
-
-	origin, err := url.Parse(c.baseURL)
-	if err != nil {
-		return fmt.Errorf("flexibee: invalid base URL: %w", err)
-	}
-
-	if origin.Scheme == "https" && req.URL.Scheme == "http" {
-		return fmt.Errorf("flexibee: redirect refused: HTTPS→HTTP downgrade to %s",
-			req.URL.Redacted())
-	}
-	if !sameOrigin(origin, req.URL) {
-		return fmt.Errorf("flexibee: redirect refused: cross-origin to %s (origin %s)",
-			req.URL.Redacted(), origin.Redacted())
-	}
-	return nil
+// TransportName returns the name of the active transport.
+func (c *Client) TransportName() string {
+	return c.transport.Name()
 }
 
-// sameOrigin reports whether a and b share scheme, hostname, and effective port.
-func sameOrigin(a, b *url.URL) bool {
-	return a.Scheme == b.Scheme &&
-		strings.EqualFold(a.Hostname(), b.Hostname()) &&
-		effectivePort(a) == effectivePort(b)
-}
-
-// effectivePort returns the explicit port from u, or the default for the scheme.
-func effectivePort(u *url.URL) string {
-	if p := u.Port(); p != "" {
-		return p
-	}
-	switch u.Scheme {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	}
-	return ""
-}
+// ── HTTP primitives ───────────────────────────────────────────────────────────
 
 // Get performs an authenticated GET request and returns the raw response body.
-//
-// path is a URL path (and optional query string) relative to cfg.BaseURL.
-// Context cancellation is respected.
+// path is relative to cfg.BaseURL.
 func (c *Client) Get(ctx context.Context, path string) ([]byte, error) {
-	return c.do(ctx, http.MethodGet, path, nil)
+	return c.transport.Get(ctx, path)
 }
 
-// Post performs an authenticated POST request with a JSON body and returns the
-// raw response body.  body is sent as application/json.
+// Post performs an authenticated POST request with a JSON body.
 func (c *Client) Post(ctx context.Context, path string, body []byte) ([]byte, error) {
-	return c.do(ctx, http.MethodPost, path, body)
+	return c.transport.Post(ctx, path, body)
 }
 
-// do executes a single HTTP request and returns the raw response body.
-// Passwords are never logged or included in error messages.
-// Response bodies are never logged at the transport layer.
-func (c *Client) do(ctx context.Context, method, path string, body []byte) ([]byte, error) {
-	rawURL := c.baseURL + path
-
-	var bodyReader io.Reader
-	if len(body) > 0 {
-		bodyReader = bytes.NewReader(body)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, method, rawURL, bodyReader)
-	if err != nil {
-		return nil, NewConfigError(fmt.Sprintf("building %s request for %q: %v", method, path, err))
-	}
-	req.SetBasicAuth(c.username, c.password)
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", c.userAgent)
-	if len(body) > 0 {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return nil, NewTransportError(fmt.Sprintf("%s %q: %v", method, path, err), err)
-		}
-		return nil, NewTransportError(fmt.Sprintf("%s %q: %v", method, path, err), err)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, NewTransportError(
-			fmt.Sprintf("reading response body from %s %q: %v", method, path, err), err)
-	}
-
-	// 2xx: return to caller; ParseAppErrors handles 200-body application errors.
-	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
-		return respBody, nil
-	}
-
-	// NewHTTPError performs HTML detection, JSON message extraction, and
-	// status-code-to-ErrorKind mapping.
-	return nil, NewHTTPError(resp.StatusCode, respBody)
+// Put performs an authenticated PUT request with a JSON body.
+func (c *Client) Put(ctx context.Context, path string, body []byte) ([]byte, error) {
+	return c.transport.Put(ctx, path, body)
 }
 
-// ── Domain method stubs (pending WP7) ─────────────────────────────────────────
+// Delete performs an authenticated DELETE request.
+func (c *Client) Delete(ctx context.Context, path string) ([]byte, error) {
+	return c.transport.Delete(ctx, path)
+}
+
+// ── Domain methods ────────────────────────────────────────────────────────────
 
 // Ping checks server reachability by fetching /c.json.
+// Returns the server version string if available, or an empty string.
 func (c *Client) Ping(ctx context.Context) (string, error) {
 	body, err := c.Get(ctx, "/c.json")
 	if err != nil {
@@ -378,6 +234,19 @@ func (c *Client) ListReports(ctx context.Context, company, evidence string) ([]R
 		return nil, NewTransportError("parsing reports.json: "+err.Error(), err)
 	}
 	return env.Reports.Report, nil
+}
+
+// ListActions returns action definitions for the given company/evidence pair.
+func (c *Client) ListActions(ctx context.Context, company, evidence string) ([]Action, error) {
+	body, err := c.Get(ctx, "/c/"+company+"/"+evidence+"/actions.json")
+	if err != nil {
+		return nil, err
+	}
+	var env ActionsEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, NewTransportError("parsing actions.json: "+err.Error(), err)
+	}
+	return env.Actions.Action, nil
 }
 
 // QueryRecords executes a bounded record query.
@@ -513,6 +382,302 @@ func (c *Client) SumRecords(ctx context.Context, company, evidence string, filte
 	}
 	return totals, filterExpr, nil
 }
+
+// ── Write operations ──────────────────────────────────────────────────────────
+
+// ── Write operations ──────────────────────────────────────────────────────────
+
+// UpsertRecord creates or updates a record in an evidence.
+// The body must be a valid winstrom-wrapped JSON object:
+//
+//	{"winstrom": {"<evidence>": {<fields>}}}
+func (c *Client) UpsertRecord(ctx context.Context, company, evidence string, body []byte) (map[string]interface{}, error) {
+	path := "/c/" + company + "/" + evidence + ".json"
+	respBody, err := c.Put(ctx, path, body)
+	if err != nil {
+		return nil, err
+	}
+	if appErr := ParseAppErrors(respBody); appErr != nil {
+		return nil, appErr
+	}
+	var env WinstromEnvelope
+	if err := json.Unmarshal(respBody, &env); err != nil {
+		return nil, NewTransportError("parsing upsert response: "+err.Error(), err)
+	}
+	var records []map[string]interface{}
+	if len(env.Records) > 0 {
+		_ = json.Unmarshal(env.Records[0], &records)
+	}
+	if len(records) == 0 {
+		return map[string]interface{}{}, nil
+	}
+	return records[0], nil
+}
+
+// DeleteRecord deletes a record by identifier.
+func (c *Client) DeleteRecord(ctx context.Context, company, evidence, identifier string) error {
+	path := "/c/" + company + "/" + evidence + "/" + identifier + ".json"
+	body, err := c.Delete(ctx, path)
+	if err != nil {
+		return err
+	}
+	if appErr := ParseAppErrors(body); appErr != nil {
+		return appErr
+	}
+	return nil
+}
+
+// ExecuteAction fires a named action on a record.
+func (c *Client) ExecuteAction(ctx context.Context, company, evidence, identifier, action string) (map[string]interface{}, error) {
+	path := "/c/" + company + "/" + evidence + "/" + identifier + "/a/" + action + ".json"
+	body, err := c.Post(ctx, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if appErr := ParseAppErrors(body); appErr != nil {
+		return nil, appErr
+	}
+	var env WinstromEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, NewTransportError("parsing action response: "+err.Error(), err)
+	}
+	var records []map[string]interface{}
+	if len(env.Records) > 0 {
+		_ = json.Unmarshal(env.Records[0], &records)
+	}
+	if len(records) == 0 {
+		return map[string]interface{}{}, nil
+	}
+	return records[0], nil
+}
+
+// ── Binary / document downloads ───────────────────────────────────────────────
+
+// BinaryResult holds a raw byte payload and its MIME type.
+type BinaryResult struct {
+	Data     []byte
+	MIMEType string
+}
+
+// GetReport downloads a report in the requested format.
+// format should be one of: pdf, xlsx, xls, csv, xml, isdoc, isdocx.
+// reportPath is the reportPath value from ListReports (e.g. "faktura").
+// filter optionally restricts records included in the report.
+func (c *Client) GetReport(ctx context.Context, company, evidence, reportPath, format string, filter FilterNode) (*BinaryResult, error) {
+	path := "/c/" + company + "/" + evidence + "/" + reportPath + "." + format
+	if filter != nil {
+		expr := filter.Build()
+		if expr != "" {
+			path = "/c/" + company + "/" + evidence + "/(" + filterPathEscape(expr) + ")/" + reportPath + "." + format
+		}
+	}
+	body, err := c.transport.Get(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	return &BinaryResult{
+		Data:     body,
+		MIMEType: mimeForFormat(format),
+	}, nil
+}
+
+// ListAttachments returns the attachment records for a given evidence record.
+// FlexiBee stores attachments in the "priloha" sub-evidence.
+func (c *Client) ListAttachments(ctx context.Context, company, evidence, identifier string) ([]map[string]interface{}, error) {
+	path := "/c/" + company + "/" + evidence + "/" + identifier + "/prilohy.json"
+	body, err := c.Get(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	if appErr := ParseAppErrors(body); appErr != nil {
+		return nil, appErr
+	}
+	var env WinstromEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, NewTransportError("parsing attachments: "+err.Error(), err)
+	}
+	var records []map[string]interface{}
+	if len(env.Records) > 0 {
+		_ = json.Unmarshal(env.Records[0], &records)
+	}
+	return records, nil
+}
+
+// GetAttachment downloads the binary content of an attachment.
+// attachmentID is the numeric id of the attachment record in "priloha" evidence.
+func (c *Client) GetAttachment(ctx context.Context, company, attachmentID string) (*BinaryResult, error) {
+	// FlexiBee attachment download: GET /c/{co}/priloha/{id}/content
+	path := "/c/" + company + "/priloha/" + attachmentID + "/content"
+	body, err := c.transport.Get(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	// MIME type is guessed from filename if available; default to octet-stream.
+	return &BinaryResult{
+		Data:     body,
+		MIMEType: "application/octet-stream",
+	}, nil
+}
+
+// ── Changes API ───────────────────────────────────────────────────────────────
+
+// ChangeRecord represents one record change from the FlexiBee Changes API.
+type ChangeRecord struct {
+	ID        string `json:"id"`
+	Evidence  string `json:"evidence"`
+	Timestamp string `json:"timestamp"`
+	Method    string `json:"method"` // INSERT, UPDATE, DELETE
+}
+
+// ChangesResult holds the Changes API response.
+type ChangesResult struct {
+	LastEventID int64          `json:"last_event_id"`
+	Changes     []ChangeRecord `json:"changes"`
+}
+
+// GetChanges fetches records changed since lastEventID from the Changes API.
+// Returns the changes and the new lastEventID to use on the next call.
+func (c *Client) GetChanges(ctx context.Context, company string, lastEventID int64) (*ChangesResult, error) {
+	path := fmt.Sprintf("/c/%s/changes.json?start=%d&limit=200", company, lastEventID)
+	body, err := c.Get(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	if appErr := ParseAppErrors(body); appErr != nil {
+		return nil, appErr
+	}
+	// Parse the changes envelope.
+	var env struct {
+		Winstrom struct {
+			LastEventID json.Number `json:"@lastEventId"`
+			Changes     json.RawMessage
+		} `json:"winstrom"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, NewTransportError("parsing changes response: "+err.Error(), err)
+	}
+	lastID, _ := env.Winstrom.LastEventID.Int64()
+
+	// Parse changes from the WinstromEnvelope.
+	var outerEnv WinstromEnvelope
+	_ = json.Unmarshal(body, &outerEnv)
+	var changes []ChangeRecord
+	for _, raw := range outerEnv.Records {
+		_ = json.Unmarshal(raw, &changes)
+	}
+
+	return &ChangesResult{
+		LastEventID: lastID,
+		Changes:     changes,
+	}, nil
+}
+
+// ── Company statistics ────────────────────────────────────────────────────────
+
+// GetCompanyStats returns statistics about the given company.
+func (c *Client) GetCompanyStats(ctx context.Context, company string) (map[string]interface{}, error) {
+	body, err := c.Get(ctx, "/c/"+company+"/statistics.json")
+	if err != nil {
+		return nil, err
+	}
+	if appErr := ParseAppErrors(body); appErr != nil {
+		return nil, appErr
+	}
+	var env WinstromEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, NewTransportError("parsing statistics response: "+err.Error(), err)
+	}
+	var stats map[string]interface{}
+	if len(env.Records) > 0 {
+		_ = json.Unmarshal(env.Records[0], &stats)
+	}
+	return stats, nil
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+// mimeForFormat maps a FlexiBee format suffix to a MIME type.
+func mimeForFormat(format string) string {
+	switch format {
+	case "pdf":
+		return "application/pdf"
+	case "xlsx":
+		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	case "xls":
+		return "application/vnd.ms-excel"
+	case "csv":
+		return "text/csv"
+	case "xml":
+		return "application/xml"
+	case "isdoc", "isdocx":
+		return "application/x-isdoc"
+	case "json":
+		return "application/json"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+// ── Saved queries ─────────────────────────────────────────────────────────────
+
+// ListSavedQueries returns all named saved queries for the given company.
+// These are stored in the "uzivatelsky-dotaz" evidence.
+func (c *Client) ListSavedQueries(ctx context.Context, company string) ([]map[string]interface{}, error) {
+	body, err := c.Get(ctx, "/c/"+company+"/uzivatelsky-dotaz.json")
+	if err != nil {
+		return nil, err
+	}
+	if appErr := ParseAppErrors(body); appErr != nil {
+		return nil, appErr
+	}
+	var env WinstromEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, NewTransportError("parsing saved queries: "+err.Error(), err)
+	}
+	var queries []map[string]interface{}
+	if len(env.Records) > 0 {
+		_ = json.Unmarshal(env.Records[0], &queries)
+	}
+	return queries, nil
+}
+
+// RunSavedQuery executes a named saved query by its ID or code.
+// Returns records, optional total count, or error.
+func (c *Client) RunSavedQuery(ctx context.Context, company, queryID string, limit, start int) (
+	[]map[string]interface{}, *int, error,
+) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	path := fmt.Sprintf("/c/%s/uzivatelsky-dotaz/%s/call.json?limit=%d&start=%d&add-row-count=true",
+		company, queryID, limit, start)
+	body, err := c.Get(ctx, path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if appErr := ParseAppErrors(body); appErr != nil {
+		return nil, nil, appErr
+	}
+	var env WinstromEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, nil, NewTransportError("parsing saved query result: "+err.Error(), err)
+	}
+	var records []map[string]interface{}
+	if len(env.Records) > 0 {
+		_ = json.Unmarshal(env.Records[0], &records)
+	}
+	var total *int
+	if env.RowCount != "" {
+		n := parseRowCount(env.RowCount)
+		total = &n
+	}
+	return records, total, nil
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 // parseRowCount converts a FlexiBee @rowCount string to int.
 // Returns 0 on any parse failure.

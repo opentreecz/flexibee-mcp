@@ -1,0 +1,21 @@
+# FlexiBee MCP — Codex CLI configuration
+# Place this as ~/.codex/config.toml or .codex/config.toml in your project
+# (trusted projects only).
+#
+# Codex CLI shares this config with the ChatGPT desktop app and IDE extension.
+# All three clients will see the flexibee MCP server once configured here.
+#
+# Reference: https://developers.openai.com/codex/extend/mcp
+
+[mcp_servers.flexibee]
+# Full absolute path to the flexibee-mcp binary
+command = ["/usr/local/bin/flexibee-mcp"]
+
+[mcp_servers.flexibee.env]
+FLEXIBEE_URL            = "https://your-flexibee-host:5434"
+FLEXIBEE_USERNAME       = "mcpbot"
+FLEXIBEE_PASSWORD_FILE  = "/home/YOU/.flexibee-password"
+FLEXIBEE_COMPANY        = "your-company-db-id"
+FLEXIBEE_AUTH_MODE      = "session"
+# Optional: custom CA for self-signed certificates
+# FLEXIBEE_CA_FILE      = "/etc/ssl/certs/my-ca.pem"

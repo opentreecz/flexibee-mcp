@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -336,4 +337,162 @@ func TestLoad(t *testing.T) {
 			t.Errorf("Company = %q, want %q", cfg.Company, "DEMO")
 		}
 	})
+
+	t.Run("auth mode defaults to auto", func(t *testing.T) {
+		setenv(t, merge(baseline, map[string]string{
+			"FLEXIBEE_AUTH_MODE": "",
+		}))
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.AuthMode != AuthModeAuto {
+			t.Errorf("AuthMode = %q, want %q", cfg.AuthMode, AuthModeAuto)
+		}
+	})
+
+	t.Run("auth mode session is accepted", func(t *testing.T) {
+		setenv(t, merge(baseline, map[string]string{
+			"FLEXIBEE_AUTH_MODE": "session",
+		}))
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.AuthMode != AuthModeSession {
+			t.Errorf("AuthMode = %q, want %q", cfg.AuthMode, AuthModeSession)
+		}
+	})
+
+	t.Run("auth mode api is accepted", func(t *testing.T) {
+		setenv(t, merge(baseline, map[string]string{
+			"FLEXIBEE_AUTH_MODE": "api",
+		}))
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.AuthMode != AuthModeAPI {
+			t.Errorf("AuthMode = %q, want %q", cfg.AuthMode, AuthModeAPI)
+		}
+	})
+
+	t.Run("auth mode java is accepted", func(t *testing.T) {
+		setenv(t, merge(baseline, map[string]string{
+			"FLEXIBEE_AUTH_MODE": "java",
+		}))
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.AuthMode != AuthModeJava {
+			t.Errorf("AuthMode = %q, want %q", cfg.AuthMode, AuthModeJava)
+		}
+	})
+
+	t.Run("error: invalid auth mode", func(t *testing.T) {
+		setenv(t, merge(baseline, map[string]string{
+			"FLEXIBEE_AUTH_MODE": "bogus",
+		}))
+		_, err := Load()
+		if err == nil {
+			t.Fatal("expected error for invalid auth mode, got nil")
+		}
+	})
+}
+
+// ── Profile file tests ────────────────────────────────────────────────────────
+
+func TestLoadProfileFile(t *testing.T) {
+	profileJSON := `{
+		"profiles": {
+			"production": {
+				"url": "https://prod.example.com:5434",
+				"username": "mcpbot",
+				"password": "prodpass",
+				"company": "prod-co",
+				"auth_mode": "session",
+				"timeout_ms": 10000
+			},
+			"staging": {
+				"url": "https://staging.example.com:5434",
+				"username": "mcpbot-dev",
+				"password": "devpass",
+				"company": "dev-co"
+			}
+		}
+	}`
+	cfgFile := writeTempFile(t, profileJSON)
+
+	// Load "production" profile – all values from file.
+	setenv(t, map[string]string{
+		"FLEXIBEE_CONFIG_FILE": cfgFile,
+		"FLEXIBEE_PROFILE":     "production",
+		"FLEXIBEE_URL":         "",
+		"FLEXIBEE_USERNAME":    "",
+		"FLEXIBEE_PASSWORD":    "",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load (production profile): %v", err)
+	}
+	if !strings.Contains(cfg.BaseURL, "prod.example.com") {
+		t.Errorf("BaseURL = %q, want prod.example.com", cfg.BaseURL)
+	}
+	if cfg.Company != "prod-co" {
+		t.Errorf("Company = %q, want \"prod-co\"", cfg.Company)
+	}
+	if cfg.AuthMode != "session" {
+		t.Errorf("AuthMode = %q, want \"session\"", cfg.AuthMode)
+	}
+	if cfg.TimeoutMS != 10000 {
+		t.Errorf("TimeoutMS = %d, want 10000", cfg.TimeoutMS)
+	}
+}
+
+func TestLoadProfileFileEnvOverridesProfile(t *testing.T) {
+	profileJSON := `{
+		"profiles": {
+			"base": {
+				"url": "https://base.example.com:5434",
+				"username": "baseuser",
+				"password": "basepass",
+				"company": "base-co"
+			}
+		}
+	}`
+	cfgFile := writeTempFile(t, profileJSON)
+
+	// Env var URL overrides the profile URL.
+	setenv(t, map[string]string{
+		"FLEXIBEE_CONFIG_FILE": cfgFile,
+		"FLEXIBEE_PROFILE":     "base",
+		"FLEXIBEE_URL":         "https://override.example.com:5434",
+		"FLEXIBEE_USERNAME":    "",
+		"FLEXIBEE_PASSWORD":    "",
+	})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load (override profile): %v", err)
+	}
+	if !strings.Contains(cfg.BaseURL, "override.example.com") {
+		t.Errorf("BaseURL = %q, want override.example.com (env should override profile)", cfg.BaseURL)
+	}
+}
+
+func TestLoadProfileFileUnknownProfile(t *testing.T) {
+	profileJSON := `{"profiles":{"known":{"url":"https://x:5434","username":"u","password":"p"}}}`
+	cfgFile := writeTempFile(t, profileJSON)
+
+	setenv(t, map[string]string{
+		"FLEXIBEE_CONFIG_FILE": cfgFile,
+		"FLEXIBEE_PROFILE":     "no-such-profile",
+		"FLEXIBEE_URL":         "",
+		"FLEXIBEE_USERNAME":    "",
+		"FLEXIBEE_PASSWORD":    "",
+	})
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for unknown profile, got nil")
+	}
 }

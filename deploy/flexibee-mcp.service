@@ -1,0 +1,48 @@
+[Unit]
+Description=FlexiBee MCP Server
+Documentation=https://github.com/opentreecz/flexibee-mcp
+After=network.target
+
+[Service]
+Type=simple
+User=flexibee-mcp
+Group=flexibee-mcp
+
+# Binary path – adjust after installing the release
+ExecStart=/usr/local/bin/flexibee-mcp
+
+# ── Required configuration ──────────────────────────────────────────────────
+# Set your FlexiBee server URL, username, and password file.
+# Generate: install -m 600 /dev/null /etc/flexibee-mcp/password
+#           echo 'yourpassword' > /etc/flexibee-mcp/password
+Environment=FLEXIBEE_URL=https://your-server:5434
+Environment=FLEXIBEE_USERNAME=mcpbot
+Environment=FLEXIBEE_PASSWORD_FILE=/etc/flexibee-mcp/password
+Environment=FLEXIBEE_COMPANY=your-company-db-id
+
+# ── Auth mode (auto = API → session → java fallback) ────────────────────────
+Environment=FLEXIBEE_AUTH_MODE=auto
+
+# ── Optional: TLS ────────────────────────────────────────────────────────────
+# Environment=FLEXIBEE_CA_FILE=/etc/flexibee-mcp/ca.pem
+
+# ── Hardening ────────────────────────────────────────────────────────────────
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+ReadOnlyPaths=/etc/flexibee-mcp
+
+# Restart on failure, but not too aggressively
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60s
+StartLimitBurst=3
+
+# Log to journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=flexibee-mcp
+
+[Install]
+WantedBy=multi-user.target

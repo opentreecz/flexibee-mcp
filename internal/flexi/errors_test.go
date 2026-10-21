@@ -15,6 +15,13 @@ func TestNewHTTPErrorAuth(t *testing.T) {
 	}
 }
 
+func TestNewHTTPErrorPaymentRequired(t *testing.T) {
+	err := NewHTTPError(402, []byte("payment required"))
+	if err.Kind != ErrPaymentRequired {
+		t.Errorf("kind = %v, want ErrPaymentRequired", err.Kind)
+	}
+}
+
 func TestNewHTTPErrorPermission(t *testing.T) {
 	err := NewHTTPError(403, []byte("forbidden"))
 	if err.Kind != ErrPermission {

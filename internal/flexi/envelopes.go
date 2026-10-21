@@ -164,6 +164,27 @@ type ReportsEnvelope struct {
 	} `json:"reports"`
 }
 
+// ── Action ────────────────────────────────────────────────────────────────────
+
+// Action describes one callable action available on a FlexiBee evidence, as
+// returned by /c/{company}/{evidence}/actions.json.
+type Action struct {
+	ActionName string `json:"actionName"`
+	ActionPath string `json:"actionPath"`
+	URL        string `json:"url"`
+	// NeedInstance is "true" when the action requires a record identifier.
+	NeedInstance string `json:"needInstance"`
+}
+
+// ActionsEnvelope is the top-level envelope for evidence action list responses.
+//
+//	{"actions": {"action": [...]}}
+type ActionsEnvelope struct {
+	Actions struct {
+		Action []Action `json:"action"`
+	} `json:"actions"`
+}
+
 // ── WinstromEnvelope ──────────────────────────────────────────────────────────
 
 // WinstromEnvelope wraps the standard FlexiBee record response.

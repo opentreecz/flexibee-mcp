@@ -1,12 +1,30 @@
 {
-  "_comment": "Place this file as .mcp.json in your project root for Claude Code to pick it up automatically. Alternatively, register via CLI: claude mcp add flexibee /path/to/flexibee-mcp --env FLEXIBEE_URL=https://your-flexibee-host:5434 --env FLEXIBEE_USERNAME=api-user --env FLEXIBEE_PASSWORD_FILE=/path/to/.flexibee-password",
+  "_comment": [
+    "Option A — Global MCP (add once, available in all projects):",
+    "  claude mcp add flexibee \\",
+    "    -e FLEXIBEE_URL=https://your-server:5434 \\",
+    "    -e FLEXIBEE_USERNAME=mcpbot \\",
+    "    -e FLEXIBEE_PASSWORD_FILE=$HOME/.flexibee-password \\",
+    "    -e FLEXIBEE_COMPANY=your-company \\",
+    "    -e FLEXIBEE_AUTH_MODE=session \\",
+    "    -- /usr/local/bin/flexibee-mcp",
+    "",
+    "Option B — Project-local: place this file as '.mcp.json' in your project root.",
+    "Claude Code picks it up automatically when you cd into the directory.",
+    "You will be asked to approve it on first use.",
+    "",
+    "Skills: install with 'bash scripts/install-skills.sh --claude'",
+    "or manually copy skills/**/SKILL.md to ~/.claude/skills/<name>/SKILL.md"
+  ],
   "mcpServers": {
     "flexibee": {
-      "command": "/path/to/flexibee-mcp",
+      "command": "/usr/local/bin/flexibee-mcp",
       "env": {
         "FLEXIBEE_URL": "https://your-flexibee-host:5434",
-        "FLEXIBEE_USERNAME": "api-user",
-        "FLEXIBEE_PASSWORD_FILE": "/path/to/.flexibee-password"
+        "FLEXIBEE_USERNAME": "mcpbot",
+        "FLEXIBEE_PASSWORD_FILE": "/home/YOU/.flexibee-password",
+        "FLEXIBEE_COMPANY": "your-company-db-id",
+        "FLEXIBEE_AUTH_MODE": "session"
       }
     }
   }

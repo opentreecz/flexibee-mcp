@@ -1,0 +1,38 @@
+# FlexiBee MCP – Docker Compose example
+#
+# This runs the MCP server as a persistent container that Claude Desktop / Claude Code
+# can connect to over stdio, or that another service can invoke via its stdin/stdout.
+#
+# For a hosted streamable-HTTP deployment, a reverse proxy and TLS termination
+# are required (see docs/architecture.md).
+
+version: "3.9"
+
+services:
+  flexibee-mcp:
+    image: ghcr.io/opentreecz/flexibee-mcp:latest
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    environment:
+      FLEXIBEE_URL: "${FLEXIBEE_URL:-https://your-server:5434}"
+      FLEXIBEE_USERNAME: "${FLEXIBEE_USERNAME:-mcpbot}"
+      # Mount the password file as a secret below instead of inline env var.
+      FLEXIBEE_PASSWORD_FILE: "/run/secrets/flexibee_password"
+      FLEXIBEE_COMPANY: "${FLEXIBEE_COMPANY:-}"
+      FLEXIBEE_AUTH_MODE: "${FLEXIBEE_AUTH_MODE:-auto}"
+      FLEXIBEE_TIMEOUT_MS: "${FLEXIBEE_TIMEOUT_MS:-30000}"
+      FLEXIBEE_CA_FILE: "${FLEXIBEE_CA_FILE:-}"
+    secrets:
+      - flexibee_password
+    volumes:
+      # Optional: custom CA certificate
+      - type: bind
+        source: "${CA_FILE:-/dev/null}"
+        target: "/etc/flexibee-mcp/ca.pem"
+        read_only: true
+
+secrets:
+  flexibee_password:
+    file: ./flexibee-password.txt   # create this file with your password

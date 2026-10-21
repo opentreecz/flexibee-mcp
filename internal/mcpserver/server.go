@@ -39,6 +39,8 @@ func New(svc *service.Service, version string) *Server {
 		log:    observability.DefaultLogger,
 	}
 	s.registerTools()
+	s.registerWriteTools()
+	s.registerDocumentTools()
 	s.registerPrompts()
 	s.registerResources()
 	return s
@@ -289,8 +291,8 @@ func (s *Server) toolDescribeEvidence() *mcp.ServerTool {
 			),
 			mcp.Property("section",
 				mcp.Description("Schema section to return: \"fields\" (default), "+
-					"\"relations\", or \"reports\"."),
-				mcp.Enum("fields", "relations", "reports"),
+					"\"relations\", \"reports\", or \"actions\"."),
+				mcp.Enum("fields", "relations", "reports", "actions"),
 			),
 			mcp.Property("field_filter",
 				mcp.Description("Optional substring filter applied to field keys/names."),
@@ -540,7 +542,8 @@ func (s *Server) toolGetGuide() *mcp.ServerTool {
 		mcp.Input(
 			mcp.Property("topic",
 				mcp.Description("Guide topic to retrieve."),
-				mcp.Enum("overview", "invoices", "contacts", "filtering", "paging", "connection"),
+				mcp.Enum("overview", "invoices", "contacts", "filtering", "paging",
+					"connection", "write-operations", "actions"),
 				mcp.Required(true),
 			),
 		),
@@ -709,36 +712,63 @@ func (s *Server) registerResources() {
 
 var guideTopics = []string{
 	"overview", "invoices", "contacts", "filtering", "paging", "connection",
+	"write-operations", "actions",
 }
 
 var guideTexts = map[string]string{
 	"overview": `# FlexiBee MCP – Overview
 
 FlexiBee (now ABRA Flexi) is a Czech ERP system exposing a REST/JSON API.
-This MCP server provides read-only access to Phase 1 data.
+This MCP server provides read and write access to FlexiBee data.
 
 ## Tool summary
 
-| Tool                        | Purpose                                    |
-|-----------------------------|--------------------------------------------|
-| flexi_get_connection_info   | Verify connectivity and resolved company   |
-| flexi_list_companies        | Enumerate available companies              |
-| flexi_list_evidences        | Browse the evidence (table) catalog        |
-| flexi_describe_evidence     | Inspect field/relation/report schema       |
-| flexi_query_records         | Query records with filtering & paging      |
-| flexi_get_record            | Fetch a single record by identifier        |
-| flexi_get_related_records   | Traverse evidence relations                |
-| flexi_sum_records           | Compute aggregate totals                   |
-| flexi_get_guide             | Retrieve this guidance text                |
+| Tool                        | R/W | Purpose                                     |
+|-----------------------------|-----|---------------------------------------------|
+| flexi_get_connection_info   | R   | Connectivity, active transport tier         |
+| flexi_list_companies        | R   | Enumerate available companies               |
+| flexi_list_evidences        | R   | Browse the evidence (table) catalog         |
+| flexi_describe_evidence     | R   | Fields/relations/reports/actions schema     |
+| flexi_query_records         | R   | Filter, sort and page records               |
+| flexi_get_record            | R   | Single record by identifier                 |
+| flexi_get_related_records   | R   | Traverse evidence relations                 |
+| flexi_sum_records           | R   | Aggregate totals for document evidences     |
+| flexi_list_actions          | R   | List available business actions             |
+| flexi_get_report            | R   | Download report as base64 (PDF/XLSX/…)      |
+| flexi_list_attachments      | R   | List attachments on a record                |
+| flexi_get_attachment        | R   | Download attachment as base64               |
+| flexi_get_changes           | R   | Changes API: incremental sync feed          |
+| flexi_get_company_stats     | R   | Company statistics (record counts, size)    |
+| flexi_list_saved_queries    | R   | List named saved queries                    |
+| flexi_run_saved_query       | R   | Execute a named saved query                 |
+| flexi_upsert_record         | W   | Create or update a record (dry_run support) |
+| flexi_delete_record         | W   | Delete a record                             |
+| flexi_execute_action        | W   | Execute a business action on a record       |
+| flexi_get_guide             | R   | Workflow guidance text                      |
 
-## Typical workflow
+## Typical read workflow
 
-1. Call flexi_get_connection_info to confirm connectivity.
+1. Call flexi_get_connection_info to confirm connectivity and active transport.
 2. Call flexi_list_companies to discover available companies.
 3. Call flexi_list_evidences to find the relevant data table.
 4. Call flexi_describe_evidence to learn required fields.
 5. Call flexi_query_records / flexi_get_record to retrieve data.
 6. Call flexi_sum_records for financial aggregates.
+
+## Typical write workflow
+
+1. Call flexi_describe_evidence to identify required fields.
+2. Call flexi_upsert_record with dry_run=true to validate.
+3. Call flexi_upsert_record to persist when the dry run succeeds.
+4. Call flexi_list_actions + flexi_execute_action for workflows.
+
+## Transport tiers (FLEXIBEE_AUTH_MODE=auto by default)
+
+1. API (Basic Auth) – direct REST API; requires rest-api-rw licence
+2. Session (v2 HTML auth) – mimics web browser; no licence required
+3. Java subprocess – native Java client; fallback using Java's HTTP stack
+
+The active transport is shown in flexi_get_connection_info as "active_transport".
 
 ## Authentication
 
@@ -890,8 +920,8 @@ for {
 
 FLEXIBEE_URL       Base URL of the FlexiBee server, e.g.
                    https://demo.flexibee.eu:5434
-FLEXIBEE_USERNAME  API username
-FLEXIBEE_PASSWORD  API password  (mutually exclusive with FLEXIBEE_PASSWORD_FILE)
+FLEXIBEE_USERNAME  Username for authentication
+FLEXIBEE_PASSWORD  Password (mutually exclusive with FLEXIBEE_PASSWORD_FILE)
 
 ## Optional environment variables
 
@@ -901,12 +931,138 @@ FLEXIBEE_TIMEOUT_MS     HTTP timeout in milliseconds (default 30000, min 1000)
 FLEXIBEE_PAGE_SIZE      Default page size (default 50, max 200)
 FLEXIBEE_CA_FILE        Path to a custom CA certificate (PEM) for self-signed certs
 FLEXIBEE_ALLOW_HTTP     Set to "true" to permit plain http:// on loopback addresses
+FLEXIBEE_SKIP_TLS_VERIFY Set to "true" to skip TLS verification (dev only)
+
+## Authentication modes (FLEXIBEE_AUTH_MODE)
+
+auto     (default) API first → session on 402 → Java subprocess as last resort
+api      HTTP Basic Auth REST – requires rest-api-rw licence (apiUsers > 0)
+session  v2 Session Auth – mimics web browser, no API licence required
+         Uses /v2/ endpoint prefix with CSRF token, User-Agent: WinStrom/DESKTOP
+java     Native Java subprocess – uses Java's HTTP stack with WinStrom User-Agent
+         Requires Java 11+ (JDK); automatically found at well-known paths
+         or override with FLEXIBEE_JAVA_HOME
+
+## Transport priority in "auto" mode
+
+1. API (Basic Auth) – tried first; if HTTP 402 received, falls back
+2. Session (v2 HTML auth) – bypasses licence check; proven working on basic2016
+3. Java subprocess – native Java client mimic; fallback if Java JDK is available
 
 ## Security notes
 
 - Credentials are never logged or included in MCP tool responses.
 - Use FLEXIBEE_PASSWORD_FILE to avoid exposing passwords in process env.
-- FLEXIBEE_ALLOW_HTTP is only permitted for loopback hosts (127.0.0.1,
-  ::1, localhost) to support local development with FlexiBee Desktop.
+- FLEXIBEE_ALLOW_HTTP is only permitted for loopback hosts (127.0.0.1, ::1, localhost).
+- FLEXIBEE_SKIP_TLS_VERIFY disables certificate checks; only for development.
+- For session mode, use a dedicated user account (e.g. "mcpbot") to avoid
+  conflicting with active browser sessions (one session per user per client type).
+`,
+
+	"write-operations": `# FlexiBee MCP – Write operations guide
+
+## Overview
+
+Write tools mutate FlexiBee data. Always use dry_run=true first to validate.
+
+## flexi_upsert_record
+
+Creates a new record or updates an existing one.
+
+### Create a new contact
+
+{
+  "company": "my-company",
+  "evidence": "adresar",
+  "record": {
+    "nazev": "ACME s.r.o.",
+    "ic": "12345678",
+    "email": "info@acme.cz",
+    "typVztahuK": "typVztahuOdberatel"
+  }
+}
+
+### Update an existing record (by id)
+
+{
+  "company": "my-company",
+  "evidence": "adresar",
+  "record": {
+    "id": "42",
+    "email": "new@acme.cz"
+  }
+}
+
+### Dry run (validate only, no write)
+
+Set "dry_run": true to calculate totals and validate required fields
+without persisting. Useful for invoice preview.
+
+## flexi_delete_record
+
+Deletes a record. Cannot be undone. The server rejects deletion if the
+record is referenced by other records.
+
+{
+  "company": "my-company",
+  "evidence": "adresar",
+  "identifier": "42"
+}
+
+## Record identifiers
+
+Flexi selectors accepted as "identifier":
+  - Numeric id: "42"
+  - External code: "ext:MYSYSTEM:REF123"
+  - Business code: "code:CUS001"
+
+## Winstrom envelope
+
+You do not need to wrap your record. flexi_upsert_record wraps it
+automatically in {"winstrom": {"<evidence>": {fields}}} before sending.
+
+## Important notes
+
+- Field names are camelCase (check flexi_describe_evidence first).
+- Mandatory fields depend on evidence type; dry run reveals missing fields.
+- Relation fields (e.g. "firma") accept id selectors: {"firma": {"id": "5"}}.
+- Date fields use ISO 8601 format: "2024-12-31".
+`,
+
+	"actions": `# FlexiBee MCP – Business actions guide
+
+## Overview
+
+Actions trigger server-side workflows on existing records.
+Use flexi_list_actions to discover available actions, then
+flexi_execute_action to invoke one.
+
+## Common actions (faktura-vydana / invoice)
+
+| actionPath | Description |
+|------------|-------------|
+| lock       | Lock the document (prevents further editing) |
+| unlock     | Unlock the document |
+| storno     | Cancel / void the document |
+| odeslat    | Mark as sent |
+| zaplatit   | Mark as paid |
+
+## Workflow example – send an invoice
+
+1. Query the invoice: flexi_get_record
+2. List available actions: flexi_list_actions (evidence="faktura-vydana")
+3. Execute: flexi_execute_action
+   {
+     "company": "my-company",
+     "evidence": "faktura-vydana",
+     "identifier": "123",
+     "action": "odeslat"
+   }
+
+## Notes
+
+- Not all actions are available on all records (depends on document state).
+- Actions are evidence-specific; run flexi_list_actions for each evidence type.
+- Some actions have side effects (e.g. "zaplatit" creates a payment record).
 `,
 }

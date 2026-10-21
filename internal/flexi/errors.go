@@ -13,17 +13,18 @@ import (
 type ErrorKind int
 
 const (
-	ErrConfig       ErrorKind = iota // bad or missing configuration
-	ErrTransport                     // network error, timeout, or TLS failure
-	ErrAuth                          // HTTP 401 – authentication required
-	ErrPermission                    // HTTP 402/403 or licensing restriction
-	ErrNotFound                      // HTTP 404 – resource does not exist
-	ErrValidation                    // HTTP 400 – request rejected by the server
-	ErrUnsupported                   // HTTP 406 – unsupported format or report type
-	ErrConflict                      // HTTP 409 – concurrent modification conflict
-	ErrMaintenance                   // HTTP 503 – server under maintenance
-	ErrApplication                   // HTTP 200 body carries @globalError / @rowError
-	ErrHTMLResponse                  // HTML page received instead of JSON (login redirect / proxy wall)
+	ErrConfig          ErrorKind = iota // bad or missing configuration
+	ErrTransport                        // network error, timeout, or TLS failure
+	ErrAuth                             // HTTP 401 – authentication required
+	ErrPaymentRequired                  // HTTP 402 – API licence required (triggers transport fallback)
+	ErrPermission                       // HTTP 403 – access denied
+	ErrNotFound                         // HTTP 404 – resource does not exist
+	ErrValidation                       // HTTP 400 – request rejected by the server
+	ErrUnsupported                      // HTTP 406 – unsupported format or report type
+	ErrConflict                         // HTTP 409 – concurrent modification conflict
+	ErrMaintenance                      // HTTP 503 – server under maintenance
+	ErrApplication                      // HTTP 200 body carries @globalError / @rowError
+	ErrHTMLResponse                     // HTML page received instead of JSON (login redirect / proxy wall)
 )
 
 // String returns a short, stable, human-readable label for the ErrorKind.
@@ -36,6 +37,8 @@ func (k ErrorKind) String() string {
 		return "transport"
 	case ErrAuth:
 		return "auth"
+	case ErrPaymentRequired:
+		return "payment_required"
 	case ErrPermission:
 		return "permission"
 	case ErrNotFound:
@@ -186,7 +189,9 @@ func NewHTTPError(statusCode int, body []byte) *FlexiError {
 	switch statusCode {
 	case http.StatusUnauthorized: // 401
 		return &FlexiError{Kind: ErrAuth, Message: msg}
-	case http.StatusPaymentRequired, http.StatusForbidden: // 402, 403
+	case http.StatusPaymentRequired: // 402 – API licence required
+		return &FlexiError{Kind: ErrPaymentRequired, Message: msg}
+	case http.StatusForbidden: // 403
 		return &FlexiError{Kind: ErrPermission, Message: msg}
 	case http.StatusNotFound: // 404
 		return &FlexiError{Kind: ErrNotFound, Message: msg}

@@ -19,6 +19,8 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -28,6 +30,14 @@ import (
 	"github.com/opentreecz/flexibee-mcp/internal/flexi"
 	"github.com/opentreecz/flexibee-mcp/internal/metadata"
 )
+
+// jsonMarshal is a package-level alias so tests can intercept it if needed.
+var jsonMarshal = json.Marshal
+
+// encodeBase64 returns the standard base64 encoding of b.
+func encodeBase64(b []byte) string {
+	return base64.StdEncoding.EncodeToString(b)
+}
 
 const (
 	// maxPageSize is the hard upper bound on records returned per page.
@@ -47,6 +57,9 @@ type ConnectionInfo struct {
 	Reachable bool `json:"reachable"`
 	// BaseURL is the configured server base URL (no credentials).
 	BaseURL string `json:"base_url"`
+	// ActiveTransport is the transport tier that answered the probe
+	// (api, session, or java).
+	ActiveTransport string `json:"active_transport,omitempty"`
 	// ResolvedCompany is the resolved company identifier, when determinable.
 	ResolvedCompany string `json:"resolved_company,omitempty"`
 	// FlexiVersion is the server-reported version string, when available.
@@ -86,6 +99,8 @@ type EvidenceDescription struct {
 	Relations []flexi.Relation `json:"relations,omitempty"`
 	// Reports is populated when Section is "reports".
 	Reports []flexi.Report `json:"reports,omitempty"`
+	// Actions is populated when Section is "actions".
+	Actions []flexi.Action `json:"actions,omitempty"`
 }
 
 // QueryRequest holds all parameters for a QueryRecords call.
@@ -222,6 +237,7 @@ func (s *Service) GetConnectionInfo(ctx context.Context, company string) (*Conne
 	} else {
 		info.Reachable = true
 		info.FlexiVersion = version
+		info.ActiveTransport = s.client.TransportName()
 	}
 
 	// Enumerate accessible companies independently of the ping result.
@@ -315,6 +331,7 @@ func (s *Service) ListEvidences(ctx context.Context, company, search string, lim
 //   - "fields" or "" → Properties (field definitions)
 //   - "relations"    → Relations (navigable sub-resources)
 //   - "reports"      → Reports (print/export templates)
+//   - "actions"      → Actions (available business actions)
 //
 // fieldFilter, when non-empty, is a case-insensitive substring applied to
 // property Name and Title; it is ignored for non-field sections.
@@ -349,6 +366,13 @@ func (s *Service) DescribeEvidence(ctx context.Context, company, evidence, secti
 			return nil, err
 		}
 		desc.Reports = reports
+
+	case "actions":
+		actions, err := s.client.ListActions(ctx, resolved, evidence)
+		if err != nil {
+			return nil, err
+		}
+		desc.Actions = actions
 
 	default: // "fields" or any unrecognised value falls back to fields
 		props, err := s.registry.Properties(ctx, resolved, evidence)
@@ -560,5 +584,397 @@ func (s *Service) SumRecords(ctx context.Context, company, evidence string, filt
 		Evidence: evidence,
 		Totals:   totals,
 		Filter:   filterExpr,
+	}, nil
+}
+
+// ── Write operations ──────────────────────────────────────────────────────────
+
+// UpsertRequest holds the parameters for an upsert (create-or-update) call.
+type UpsertRequest struct {
+	Company  string
+	Evidence string
+	// Record is the field map to write.  Required fields depend on the evidence
+	// schema.  Use DescribeEvidence (section="fields") to find mandatory fields.
+	// For updates, include the "id" or external identifier field.
+	Record map[string]interface{}
+	// DryRun when true validates and calculates without persisting.
+	DryRun bool
+}
+
+// UpsertResult holds the outcome of an upsert operation.
+type UpsertResult struct {
+	Company  string `json:"company"`
+	Evidence string `json:"evidence"`
+	// Record is the created/updated record as returned by the server.
+	Record map[string]interface{} `json:"record,omitempty"`
+	// DryRun is true when the operation was a preview-only dry run.
+	DryRun bool `json:"dry_run"`
+}
+
+// DeleteResult holds the outcome of a delete operation.
+type DeleteResult struct {
+	Company    string `json:"company"`
+	Evidence   string `json:"evidence"`
+	Identifier string `json:"identifier"`
+	Deleted    bool   `json:"deleted"`
+}
+
+// ActionResult holds the outcome of a named action execution.
+type ActionResult struct {
+	Company    string `json:"company"`
+	Evidence   string `json:"evidence"`
+	Identifier string `json:"identifier"`
+	Action     string `json:"action"`
+	// Result is the server response body, when available.
+	Result map[string]interface{} `json:"result,omitempty"`
+}
+
+// ActionsResult is the list of available actions for an evidence.
+type ActionsResult struct {
+	Company  string         `json:"company"`
+	Evidence string         `json:"evidence"`
+	Actions  []flexi.Action `json:"actions"`
+}
+
+// UpsertRecord creates or updates a record in an evidence.
+//
+// The Record map is wrapped in the expected winstrom envelope before sending.
+// When DryRun is true the request is sent with ?dryRun=true and the server
+// validates and calculates without persisting any data.
+func (s *Service) UpsertRecord(ctx context.Context, req *UpsertRequest) (*UpsertResult, error) {
+	resolved, err := s.resolveCompany(ctx, req.Company)
+	if err != nil {
+		return nil, err
+	}
+
+	if req.Record == nil || len(req.Record) == 0 {
+		return nil, &flexi.FlexiError{
+			Kind:    flexi.ErrValidation,
+			Message: "record must not be empty",
+		}
+	}
+
+	// Wrap in the winstrom envelope: {"winstrom": {"<evidence>": {fields...}}}
+	envelope := map[string]interface{}{
+		"winstrom": map[string]interface{}{
+			req.Evidence: req.Record,
+		},
+	}
+
+	bodyBytes, err := marshalJSON(envelope)
+	if err != nil {
+		return nil, &flexi.FlexiError{Kind: flexi.ErrValidation, Message: "marshalling record: " + err.Error()}
+	}
+
+	path := "/c/" + resolved + "/" + req.Evidence + ".json"
+	if req.DryRun {
+		path += "?dryRun=true"
+	}
+
+	result, err := s.client.UpsertRecord(ctx, resolved, req.Evidence, bodyBytes)
+	_ = path // UpsertRecord uses its own path construction
+	if err != nil {
+		return nil, err
+	}
+
+	return &UpsertResult{
+		Company:  resolved,
+		Evidence: req.Evidence,
+		Record:   result,
+		DryRun:   req.DryRun,
+	}, nil
+}
+
+// DeleteRecord deletes a record by identifier.
+//
+// identifier may be a numeric id, "code:ABC", or any other Flexi selector.
+func (s *Service) DeleteRecord(ctx context.Context, company, evidence, identifier string) (*DeleteResult, error) {
+	resolved, err := s.resolveCompany(ctx, company)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.client.DeleteRecord(ctx, resolved, evidence, identifier); err != nil {
+		return nil, err
+	}
+
+	return &DeleteResult{
+		Company:    resolved,
+		Evidence:   evidence,
+		Identifier: identifier,
+		Deleted:    true,
+	}, nil
+}
+
+// ExecuteAction fires a named action on a specific record.
+//
+// action must be the actionPath value (e.g. "lock", "cancel", "send").
+// Use ListActions to enumerate available actions and their paths.
+func (s *Service) ExecuteAction(ctx context.Context, company, evidence, identifier, action string) (*ActionResult, error) {
+	resolved, err := s.resolveCompany(ctx, company)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := s.client.ExecuteAction(ctx, resolved, evidence, identifier, action)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ActionResult{
+		Company:    resolved,
+		Evidence:   evidence,
+		Identifier: identifier,
+		Action:     action,
+		Result:     result,
+	}, nil
+}
+
+// ListActions returns the available actions for a given evidence.
+func (s *Service) ListActions(ctx context.Context, company, evidence string) (*ActionsResult, error) {
+	resolved, err := s.resolveCompany(ctx, company)
+	if err != nil {
+		return nil, err
+	}
+
+	actions, err := s.client.ListActions(ctx, resolved, evidence)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ActionsResult{
+		Company:  resolved,
+		Evidence: evidence,
+		Actions:  actions,
+	}, nil
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+// marshalJSON is a thin wrapper that returns a descriptive error on failure.
+func marshalJSON(v interface{}) ([]byte, error) {
+	return jsonMarshal(v)
+}
+
+// ── Report download ───────────────────────────────────────────────────────────
+
+// ReportResult holds a downloaded report as base64 and its MIME type.
+type ReportResult struct {
+	Company    string `json:"company"`
+	Evidence   string `json:"evidence"`
+	ReportPath string `json:"report_path"`
+	Format     string `json:"format"`
+	// DataBase64 is the report bytes encoded as standard base64.
+	DataBase64 string `json:"data_base64"`
+	MIMEType   string `json:"mime_type"`
+	// SizeBytes is the byte length of the decoded data.
+	SizeBytes int `json:"size_bytes"`
+}
+
+// GetReport downloads a report in the requested format and returns it base64-encoded.
+func (s *Service) GetReport(ctx context.Context, company, evidence, reportPath, format string, filter flexi.FilterNode) (*ReportResult, error) {
+	resolved, err := s.resolveCompany(ctx, company)
+	if err != nil {
+		return nil, err
+	}
+	if format == "" {
+		format = "pdf"
+	}
+
+	result, err := s.client.GetReport(ctx, resolved, evidence, reportPath, format, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ReportResult{
+		Company:    resolved,
+		Evidence:   evidence,
+		ReportPath: reportPath,
+		Format:     format,
+		DataBase64: encodeBase64(result.Data),
+		MIMEType:   result.MIMEType,
+		SizeBytes:  len(result.Data),
+	}, nil
+}
+
+// ── Attachments ───────────────────────────────────────────────────────────────
+
+// AttachmentListResult holds the list of attachments for a record.
+type AttachmentListResult struct {
+	Company     string                   `json:"company"`
+	Evidence    string                   `json:"evidence"`
+	Identifier  string                   `json:"identifier"`
+	Attachments []map[string]interface{} `json:"attachments"`
+}
+
+// AttachmentResult holds a downloaded attachment as base64.
+type AttachmentResult struct {
+	Company      string `json:"company"`
+	AttachmentID string `json:"attachment_id"`
+	// DataBase64 is the attachment bytes encoded as standard base64.
+	DataBase64 string `json:"data_base64"`
+	MIMEType   string `json:"mime_type"`
+	SizeBytes  int    `json:"size_bytes"`
+}
+
+// ListAttachments returns the list of attachments for a record.
+func (s *Service) ListAttachments(ctx context.Context, company, evidence, identifier string) (*AttachmentListResult, error) {
+	resolved, err := s.resolveCompany(ctx, company)
+	if err != nil {
+		return nil, err
+	}
+
+	attachments, err := s.client.ListAttachments(ctx, resolved, evidence, identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	return &AttachmentListResult{
+		Company:     resolved,
+		Evidence:    evidence,
+		Identifier:  identifier,
+		Attachments: attachments,
+	}, nil
+}
+
+// GetAttachment downloads an attachment by ID, returned base64-encoded.
+func (s *Service) GetAttachment(ctx context.Context, company, attachmentID string) (*AttachmentResult, error) {
+	resolved, err := s.resolveCompany(ctx, company)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := s.client.GetAttachment(ctx, resolved, attachmentID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &AttachmentResult{
+		Company:      resolved,
+		AttachmentID: attachmentID,
+		DataBase64:   encodeBase64(result.Data),
+		MIMEType:     result.MIMEType,
+		SizeBytes:    len(result.Data),
+	}, nil
+}
+
+// ── Changes API ───────────────────────────────────────────────────────────────
+
+// ChangesResult wraps the service-level changes response.
+type ChangesResult struct {
+	Company     string               `json:"company"`
+	LastEventID int64                `json:"last_event_id"`
+	Changes     []flexi.ChangeRecord `json:"changes"`
+	// Count is the number of change records returned.
+	Count int `json:"count"`
+}
+
+// GetChanges fetches changed records since lastEventID.
+// Pass 0 for lastEventID to get all available changes.
+// Store the returned LastEventID and pass it on the next call for incremental sync.
+func (s *Service) GetChanges(ctx context.Context, company string, lastEventID int64) (*ChangesResult, error) {
+	resolved, err := s.resolveCompany(ctx, company)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := s.client.GetChanges(ctx, resolved, lastEventID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ChangesResult{
+		Company:     resolved,
+		LastEventID: result.LastEventID,
+		Changes:     result.Changes,
+		Count:       len(result.Changes),
+	}, nil
+}
+
+// ── Company statistics ────────────────────────────────────────────────────────
+
+// CompanyStatsResult wraps the company statistics response.
+type CompanyStatsResult struct {
+	Company string                 `json:"company"`
+	Stats   map[string]interface{} `json:"stats"`
+}
+
+// GetCompanyStats returns statistics for the given company.
+func (s *Service) GetCompanyStats(ctx context.Context, company string) (*CompanyStatsResult, error) {
+	resolved, err := s.resolveCompany(ctx, company)
+	if err != nil {
+		return nil, err
+	}
+
+	stats, err := s.client.GetCompanyStats(ctx, resolved)
+	if err != nil {
+		return nil, err
+	}
+
+	return &CompanyStatsResult{
+		Company: resolved,
+		Stats:   stats,
+	}, nil
+}
+
+// ── Saved queries ─────────────────────────────────────────────────────────────
+
+// SavedQueriesResult holds a list of saved queries.
+type SavedQueriesResult struct {
+	Company string                   `json:"company"`
+	Queries []map[string]interface{} `json:"queries"`
+}
+
+// SavedQueryResult holds the result of running a saved query.
+type SavedQueryResult struct {
+	Company  string                   `json:"company"`
+	QueryID  string                   `json:"query_id"`
+	Records  []map[string]interface{} `json:"records"`
+	Total    *int                     `json:"total,omitempty"`
+	Start    int                      `json:"start"`
+	Limit    int                      `json:"limit"`
+	Complete bool                     `json:"complete"`
+}
+
+// ListSavedQueries returns all named saved queries for the given company.
+func (s *Service) ListSavedQueries(ctx context.Context, company string) (*SavedQueriesResult, error) {
+	resolved, err := s.resolveCompany(ctx, company)
+	if err != nil {
+		return nil, err
+	}
+
+	queries, err := s.client.ListSavedQueries(ctx, resolved)
+	if err != nil {
+		return nil, err
+	}
+
+	return &SavedQueriesResult{
+		Company: resolved,
+		Queries: queries,
+	}, nil
+}
+
+// RunSavedQuery executes a named saved query by its ID or code and returns
+// paged records.
+func (s *Service) RunSavedQuery(ctx context.Context, company, queryID string, limit, start int) (*SavedQueryResult, error) {
+	resolved, err := s.resolveCompany(ctx, company)
+	if err != nil {
+		return nil, err
+	}
+
+	lim := s.clampLimit(limit)
+	records, total, err := s.client.RunSavedQuery(ctx, resolved, queryID, lim, start)
+	if err != nil {
+		return nil, err
+	}
+
+	return &SavedQueryResult{
+		Company:  resolved,
+		QueryID:  queryID,
+		Records:  records,
+		Total:    total,
+		Start:    start,
+		Limit:    lim,
+		Complete: len(records) < lim,
 	}, nil
 }

@@ -1,14 +1,30 @@
 {
-  "_comment": "Add the 'flexibee' block to the 'mcp' section of your opencode.json (project root or ~/.config/opencode/opencode.json). OpenCode uses type 'local' for stdio-based MCP servers.",
+  "_comment": [
+    "OpenCode MCP server configuration.",
+    "Add the 'flexibee' block to the 'mcp' section of your opencode.json:",
+    "  Global:        ~/.config/opencode/opencode.jsonc",
+    "  Project-local: ./opencode.json or ./opencode.jsonc",
+    "",
+    "After saving, start OpenCode and type /mcp in the TUI to verify.",
+    "",
+    "Skills: install with 'bash scripts/install-skills.sh --opencode'",
+    "or manually copy skills/**/SKILL.md to ~/.config/opencode/skills/<name>/SKILL.md",
+    "",
+    "Full tutorial: docs/tutorial-linux.md"
+  ],
   "mcp": {
     "flexibee": {
       "type": "local",
-      "command": ["/path/to/flexibee-mcp"],
+      "command": ["/usr/local/bin/flexibee-mcp"],
       "environment": {
         "FLEXIBEE_URL": "https://your-flexibee-host:5434",
-        "FLEXIBEE_USERNAME": "api-user",
-        "FLEXIBEE_PASSWORD_FILE": "/home/user/.flexibee-password"
-      }
+        "FLEXIBEE_USERNAME": "mcpbot",
+        "FLEXIBEE_PASSWORD_FILE": "/home/YOU/.flexibee-password",
+        "FLEXIBEE_COMPANY": "your-company-db-id",
+        "FLEXIBEE_AUTH_MODE": "session"
+      },
+      "enabled": true,
+      "timeout": 15000
     }
   }
 }
