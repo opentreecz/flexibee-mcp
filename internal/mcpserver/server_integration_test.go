@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -43,7 +44,11 @@ func buildBinary() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	out := filepath.Join(dir, "flexibee-mcp")
+	binName := "flexibee-mcp"
+	if runtime.GOOS == "windows" {
+		binName += ".exe"
+	}
+	out := filepath.Join(dir, binName)
 	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", out, "./cmd/flexibee-mcp/")
 	cmd.Dir = moduleRoot()
 	if b, err := cmd.CombinedOutput(); err != nil {
