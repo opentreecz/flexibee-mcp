@@ -1,12 +1,19 @@
 # Binaries
-flexibee-mcp
-flexibee-mcp.exe
+/flexibee-mcp
+/flexibee-mcp.exe
 dist/
 
 # Go
 *.test
 *.out
 vendor/
+
+# Python
+__pycache__/
+*.pyc
+
+# Temp / investigation
+tmp/
 
 # Environment / secrets
 .env
@@ -15,9 +22,11 @@ flexibee.env
 *_password
 *_secret
 
-# Editor
+# Editor & AI client workspaces
 .vscode/
 .idea/
+.agents/
+.gemini/
 *.swp
 *.swo
 

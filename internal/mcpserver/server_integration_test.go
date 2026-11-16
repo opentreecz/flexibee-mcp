@@ -44,7 +44,7 @@ func buildBinary() (string, error) {
 		return "", err
 	}
 	out := filepath.Join(dir, "flexibee-mcp")
-	cmd := exec.Command("go", "build", "-o", out, "./cmd/flexibee-mcp/")
+	cmd := exec.Command("go", "build", "-buildvcs=false", "-o", out, "./cmd/flexibee-mcp/")
 	cmd.Dir = moduleRoot()
 	if b, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("%v\n%s", err, b)
